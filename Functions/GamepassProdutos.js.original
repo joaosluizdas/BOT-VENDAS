@@ -1,0 +1,802 @@
+const {
+    ButtonBuilder, ActionRowBuilder, ModalBuilder, TextInputBuilder,
+    TextInputStyle, StringSelectMenuBuilder, EmbedBuilder,
+    ChannelType, PermissionFlagsBits
+} = require("discord.js");
+const { res } = require("../res");
+const { JsonDatabase } = require("wio.db");
+const { v4: uuidv4 } = require("uuid");
+
+const emojisDb = require("../DataBaseJson/emojis.json");
+const Emojis = { get: (name) => emojisDb[name] || "" };
+
+const gamepassJogos = new JsonDatabase({ databasePath: "./DataBaseJson/gamepassJogos.json" });
+const robuxConfig = new JsonDatabase({ databasePath: "./DataBaseJson/configuracaorobux.json" });
+const carrinhosJogo = new JsonDatabase({ databasePath: "./DataBaseJson/carrinhosJogo.json" });
+
+async function getUniverseInfo(universeId) {
+    try {
+        const r = await fetch(`https://games.roblox.com/v1/games?universeIds=${universeId}`);
+        const data = await r.json();
+        if (data.data && data.data.length > 0) {
+            const game = data.data[0];
+            const thumbRes = await fetch(`https://thumbnails.roblox.com/v1/games/icons?universeIds=${universeId}&size=150x150&format=Png`);
+            const thumbData = await thumbRes.json();
+            const icon = thumbData.data?.[0]?.imageUrl || null;
+            return { id: universeId, name: game.name, creator: game.creator?.name, icon };
+        }
+        return null;
+    } catch (e) { return null; }
+}
+
+// ─── PAINEL PRINCIPAL ─────────────────────────────────────────────────────────
+async function painelGamepassJogos(interaction) {
+    const jogos = gamepassJogos.fetchAll() || [];
+
+    const rowVoltar = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("voltar_robux_painel").setLabel('Voltar').setEmoji(Emojis.get('_back_emoji') || '◀️').setStyle(2)
+    );
+
+    const containerContent = res.main(
+        { type: 10, content: `-# Painel > WINNBUXX > Produtos de Jogos Roblox` },
+        { type: 14 },
+        { type: 10, content: `**Sistema de Produtos por Jogo**\nCadastre jogos, crie **categorias** e **produtos** personalizados, envie painéis em canais diferentes e gere **carrinhos automáticos** para os compradores.` },
+        { type: 14 },
+        { type: 10, content: `> ${Emojis.get('caixagrande') || '📦'} **Jogos Cadastrados:** \`${jogos.length}\`` },
+        { type: 14 },
+        {
+            type: 1,
+            components: [
+                { type: 2, style: 1, label: "Adicionar Jogo", custom_id: "gpj_adicionar_jogo", emoji: { id: "1178067873894236311" } },
+                { type: 2, style: 2, label: "Gerenciar Jogos", custom_id: "gpj_gerenciar_jogos", emoji: { id: "1178067945855910078" } },
+                { type: 2, style: 2, label: "Enviar Painel", custom_id: "gpj_enviar_mensagem", emoji: { id: "1178076954029731930" } }
+            ]
+        }
+    ).with({ components: [rowVoltar], flags: [64] });
+
+    if (interaction.deferred || interaction.replied) await interaction.editReply(containerContent);
+    else await interaction.update(containerContent);
+}
+
+// ─── ADICIONAR JOGO ───────────────────────────────────────────────────────────
+async function modalAdicionarJogo(interaction) {
+    const modal = new ModalBuilder().setCustomId('gpj_modal_add_jogo').setTitle('Adicionar Jogo do Roblox');
+    modal.addComponents(
+        new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('jogo_nome').setLabel('Nome do Jogo').setPlaceholder('Ex: Jailbreak, Blox Fruits...').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(100)
+        ),
+        new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('jogo_universe_id').setLabel('Universe ID (opcional)').setPlaceholder('Ex: 606849621 — deixe vazio se não souber').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(20)
+        )
+    );
+    await interaction.showModal(modal);
+}
+
+async function handleModalAdicionarJogo(interaction) {
+    const nome = interaction.fields.getTextInputValue('jogo_nome').trim();
+    const universeIdRaw = interaction.fields.getTextInputValue('jogo_universe_id').trim();
+    await interaction.deferReply({ ephemeral: true });
+
+    const universeId = universeIdRaw && !isNaN(universeIdRaw) ? universeIdRaw : `custom_${Date.now()}`;
+    const jogoKey = `jogo_${universeId}`;
+    if (gamepassJogos.get(jogoKey)) {
+        return interaction.editReply({ content: `${Emojis.get('negative') || '❌'} | Já existe um jogo com o ID \`${universeId}\`.` });
+    }
+
+    gamepassJogos.set(jogoKey, {
+        id: universeId, nome, criador: null, icone: null,
+        produtos: [], categorias: [], paineis: [], criadoEm: Date.now()
+    });
+    await interaction.editReply({ content: `${Emojis.get('checker') || '✅'} | Jogo **${nome}** adicionado! Use "Gerenciar Jogos" para criar categorias e produtos.` });
+}
+
+// ─── GERENCIAR JOGOS ──────────────────────────────────────────────────────────
+async function painelGerenciarJogos(interaction) {
+    const jogos = gamepassJogos.fetchAll() || [];
+    const rowVoltar = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("gpj_painel_main").setLabel('Voltar').setEmoji(Emojis.get('_back_emoji') || '◀️').setStyle(2)
+    );
+
+    if (jogos.length === 0) {
+        const c = res.main({ type: 10, content: `-# Painel > Jogos > Gerenciar` }, { type: 14 }, { type: 10, content: `${Emojis.get('negative') || '❌'} Nenhum jogo cadastrado ainda.` })
+            .with({ components: [rowVoltar], flags: [64] });
+        return interaction.deferred || interaction.replied ? interaction.editReply(c) : interaction.update(c);
+    }
+
+    const options = jogos.slice(0, 25).map(j => ({
+        label: j.data.nome.slice(0, 25),
+        description: `${(j.data.categorias || []).length} cat. | ${(j.data.produtos || []).length} prod.`,
+        value: `jogo_${j.data.id}`,
+        emoji: { id: "1459388854715940968" }
+    }));
+
+    const c = res.main(
+        { type: 10, content: `-# Painel > Jogos > Gerenciar` }, { type: 14 },
+        { type: 10, content: `**Jogos Cadastrados**\nSelecione um jogo para gerenciar.` }, { type: 14 },
+        { type: 1, components: [{ type: 3, custom_id: "gpj_select_jogo", placeholder: "Selecione um jogo", options }] }
+    ).with({ components: [rowVoltar], flags: [64] });
+
+    if (interaction.deferred || interaction.replied) await interaction.editReply(c);
+    else await interaction.update(c);
+}
+
+// ─── PAINEL DE UM JOGO (com botão Categorias) ─────────────────────────────────
+async function painelJogo(interaction, jogoKey) {
+    const jogo = gamepassJogos.get(jogoKey);
+    if (!jogo) return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Jogo não encontrado!`, ephemeral: true });
+
+    const rowVoltar = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("gpj_gerenciar_jogos").setLabel('Voltar').setEmoji(Emojis.get('_back_emoji') || '◀️').setStyle(2)
+    );
+
+    const totalProd = (jogo.produtos || []).length;
+    const ativos = (jogo.produtos || []).filter(p => p.status).length;
+    const totalCat = (jogo.categorias || []).length;
+    const totalPaineis = (jogo.paineis || []).length;
+
+    const c = res.main(
+        { type: 10, content: `-# Painel > Jogos > ${jogo.nome}` }, { type: 14 },
+        ...(jogo.icone ? [{ type: 12, items: [{ media: { url: jogo.icone }, spoiler: false }] }] : []),
+        { type: 10, content: `**${jogo.nome}**\n> Universe ID: \`${jogo.id}\`\n> Categorias: \`${totalCat}\` | Produtos: \`${totalProd}\` (${ativos} ativos) | Painéis: \`${totalPaineis}\`` },
+        { type: 14 },
+        {
+            type: 1, components: [
+                { type: 2, style: 1, label: "Categorias", custom_id: `gpj_categorias_${jogo.id}`, emoji: { id: "1178067873894236311" } },
+                { type: 2, style: 2, label: "Produtos", custom_id: `gpj_ver_produtos_${jogo.id}`, emoji: { id: "1178067945855910078" } },
+                { type: 2, style: 2, label: "Enviar Painel", custom_id: `gpj_enviar_jogo_${jogo.id}`, emoji: { id: "1178076954029731930" } },
+                { type: 2, style: 4, label: "Remover Jogo", custom_id: `gpj_remover_jogo_${jogo.id}`, emoji: { id: "1178076767567757312" } }
+            ]
+        }
+    ).with({ components: [rowVoltar], flags: [64] });
+
+    if (interaction.deferred || interaction.replied) await interaction.editReply(c);
+    else await interaction.update(c);
+}
+
+// ─── CATEGORIAS ───────────────────────────────────────────────────────────────
+async function painelCategorias(interaction, universeId) {
+    const jogoKey = `jogo_${universeId}`;
+    const jogo = gamepassJogos.get(jogoKey);
+    if (!jogo) return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Jogo não encontrado!`, ephemeral: true });
+
+    const categorias = jogo.categorias || [];
+    const rowVoltar = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`gpj_jogo_${universeId}`).setLabel('Voltar').setEmoji(Emojis.get('_back_emoji') || '◀️').setStyle(2)
+    );
+
+    const listaText = categorias.length === 0 ? `> Nenhuma categoria criada ainda.`
+        : categorias.map((c, i) => `> **${i + 1}. ${c.emoji || '📦'} ${c.nome}** \`(${(jogo.produtos || []).filter(p => p.categoriaId === c.id).length} prod.)\``).join('\n');
+
+    const rows = [rowVoltar];
+    if (categorias.length > 0) {
+        rows.unshift(new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder().setCustomId('gpj_select_cat').setPlaceholder('Selecione uma categoria para remover ou gerenciar')
+                .addOptions(categorias.slice(0, 25).map(c => ({
+                    label: `${c.nome}`.slice(0, 25),
+                    description: `${(jogo.produtos || []).filter(p => p.categoriaId === c.id).length} produto(s)`,
+                    value: `gpj_cat_${universeId}|||${c.id}`,
+                    emoji: c.emoji ? undefined : { id: "1459388854715940968" }
+                })))
+        ));
+    }
+
+    const c = res.main(
+        { type: 10, content: `-# ${jogo.nome} > Categorias` }, { type: 14 },
+        { type: 10, content: `**Categorias do Jogo**\n${listaText}` }, { type: 14 },
+        { type: 1, components: [{ type: 2, style: 1, label: "Nova Categoria", custom_id: `gpj_add_cat_${universeId}`, emoji: { id: "1178067873894236311" } }] }
+    ).with({ components: rows, flags: [64] });
+
+    if (interaction.deferred || interaction.replied) await interaction.editReply(c);
+    else await interaction.update(c);
+}
+
+async function modalCriarCategoria(interaction, universeId) {
+    const modal = new ModalBuilder().setCustomId(`gpj_modal_cat_${universeId}`).setTitle('Nova Categoria');
+    modal.addComponents(
+        new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('cat_nome').setLabel('Nome da Categoria').setPlaceholder('Ex: Frutas, Gamepasses, Itens...').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(30)
+        ),
+        new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('cat_emoji').setLabel('Emoji (opcional)').setPlaceholder('Ex: 🍎, 🎫, 🗡️').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(10)
+        )
+    );
+    await interaction.showModal(modal);
+}
+
+async function handleModalCriarCategoria(interaction, universeId) {
+    const nome = interaction.fields.getTextInputValue('cat_nome').trim();
+    const emoji = interaction.fields.getTextInputValue('cat_emoji').trim() || '📦';
+
+    const jogoKey = `jogo_${universeId}`;
+    const jogo = gamepassJogos.get(jogoKey);
+    if (!jogo) return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Jogo não encontrado!`, ephemeral: true });
+
+    const categorias = jogo.categorias || [];
+    categorias.push({ id: uuidv4(), nome, emoji, criadoEm: Date.now() });
+    gamepassJogos.set(`${jogoKey}.categorias`, categorias);
+
+    await painelCategorias(interaction, universeId);
+    interaction.followUp({ content: `${Emojis.get('checker') || '✅'} | Categoria **${emoji} ${nome}** criada!`, ephemeral: true });
+}
+
+async function removerCategoria(interaction, universeId, catId) {
+    const jogoKey = `jogo_${universeId}`;
+    const jogo = gamepassJogos.get(jogoKey);
+    if (!jogo) return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Jogo não encontrado!`, ephemeral: true });
+
+    const categorias = (jogo.categorias || []).filter(c => c.id !== catId);
+    gamepassJogos.set(`${jogoKey}.categorias`, categorias);
+    // Remover categoria dos produtos
+    const produtos = (jogo.produtos || []).map(p => p.categoriaId === catId ? { ...p, categoriaId: null } : p);
+    gamepassJogos.set(`${jogoKey}.produtos`, produtos);
+
+    await painelCategorias(interaction, universeId);
+    interaction.followUp({ content: `${Emojis.get('checker') || '✅'} | Categoria removida!`, ephemeral: true });
+}
+
+
+// ─── GERENCIAR CATEGORIA (painel de detalhes) ─────────────────────────────────
+async function painelGerenciarCategoria(interaction, universeId, catId) {
+    const jogoKey = `jogo_${universeId}`;
+    const jogo = gamepassJogos.get(jogoKey);
+    if (!jogo) return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Jogo não encontrado!`, ephemeral: true });
+
+    const cat = (jogo.categorias || []).find(c => c.id === catId);
+    if (!cat) return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Categoria não encontrada!`, ephemeral: true });
+
+    const produtos = (jogo.produtos || []).filter(p => p.categoriaId === catId);
+    const rowVoltar = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`gpj_categorias_${universeId}`).setLabel('Voltar').setEmoji(Emojis.get('_back_emoji') || '◀️').setStyle(2)
+    );
+
+    const listaText = produtos.length === 0
+        ? `> Nenhum produto nesta categoria.`
+        : produtos.map((p, i) => `> **${i + 1}. ${p.nome}** — \`R$ ${parseFloat(p.preco).toFixed(2)}\` ${p.status ? (Emojis.get('checker') || '✅') : (Emojis.get('negative') || '❌')}`).join('\n');
+
+    const c = res.main(
+        { type: 10, content: `-# ${jogo.nome} > Categorias > ${cat.emoji || '📦'} ${cat.nome}` }, { type: 14 },
+        { type: 10, content: `**${cat.emoji || '📦'} ${cat.nome}**\n> ${produtos.length} produto(s) nesta categoria\n\n${listaText}` }, { type: 14 },
+        {
+            type: 1, components: [
+                { type: 2, style: 1, label: "Adicionar Produto", custom_id: `gpj_add_prod_cat_${universeId}|||${catId}`, emoji: { id: "1178067873894236311" } },
+                { type: 2, style: 4, label: "Remover Categoria", custom_id: `gpj_remover_cat_${universeId}|||${catId}`, emoji: { id: "1178076767567757312" } }
+            ]
+        }
+    ).with({ components: [rowVoltar], flags: [64] });
+
+    if (interaction.deferred || interaction.replied) await interaction.editReply(c);
+    else await interaction.update(c);
+}
+
+// ─── EDITAR PRODUTO (modal) ────────────────────────────────────────────────────
+async function modalEditarProduto(interaction, universeId, produtoId) {
+    const jogoKey = `jogo_${universeId}`;
+    const jogo = gamepassJogos.get(jogoKey);
+    if (!jogo) return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Jogo não encontrado!`, ephemeral: true });
+    const produto = (jogo.produtos || []).find(p => p.id === produtoId);
+    if (!produto) return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Produto não encontrado!`, ephemeral: true });
+    const categorias = jogo.categorias || [];
+    const catAtual = categorias.find(c => c.id === produto.categoriaId);
+
+    const modal = new ModalBuilder().setCustomId(`gpj_modal_edit_produto_${universeId}|||${produtoId}`).setTitle('Editar Produto');
+    modal.addComponents(
+        new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('prod_nome').setLabel('Nome do Produto').setValue(produto.nome).setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(50)
+        ),
+        new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('prod_tipo').setLabel('Tipo (gamepass / item / outro)').setValue(produto.tipo).setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(20)
+        ),
+        new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('prod_preco').setLabel('Preço em R$').setValue(String(parseFloat(produto.preco).toFixed(2))).setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(10)
+        ),
+        new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('prod_descricao').setLabel('Descrição (opcional)').setValue(produto.descricao || '').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(300)
+        ),
+        new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('prod_categoria_id').setLabel('ID da Categoria (8 primeiros chars)').setPlaceholder(catAtual ? `${catAtual.emoji} ${catAtual.nome} [${catAtual.id.slice(0, 8)}]` : 'Deixe vazio para sem categoria').setValue(catAtual ? catAtual.id.slice(0, 8) : '').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(36)
+        )
+    );
+    await interaction.showModal(modal);
+}
+
+async function handleModalEditarProduto(interaction, universeId, produtoId) {
+    const nome = interaction.fields.getTextInputValue('prod_nome').trim();
+    const tipo = interaction.fields.getTextInputValue('prod_tipo').toLowerCase().trim();
+    const precoStr = interaction.fields.getTextInputValue('prod_preco');
+    const descricao = interaction.fields.getTextInputValue('prod_descricao').trim();
+    const catSearch = interaction.fields.getTextInputValue('prod_categoria_id').trim();
+
+    const preco = parseFloat(precoStr.replace(',', '.'));
+    if (isNaN(preco) || preco <= 0) return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Preço inválido!`, ephemeral: true });
+
+    const jogoKey = `jogo_${universeId}`;
+    const jogo = gamepassJogos.get(jogoKey);
+    if (!jogo) return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Jogo não encontrado!`, ephemeral: true });
+
+    const produtos = jogo.produtos || [];
+    const idx = produtos.findIndex(p => p.id === produtoId);
+    if (idx === -1) return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Produto não encontrado!`, ephemeral: true });
+
+    let categoriaId = null;
+    if (catSearch) {
+        const cat = (jogo.categorias || []).find(c => c.id.startsWith(catSearch) || c.nome.toLowerCase().includes(catSearch.toLowerCase()));
+        if (cat) categoriaId = cat.id;
+    }
+
+    produtos[idx] = { ...produtos[idx], nome, tipo, preco, descricao, categoriaId };
+    gamepassJogos.set(`${jogoKey}.produtos`, produtos);
+
+    await painelProduto(interaction, universeId, produtoId);
+    interaction.followUp({ content: `${Emojis.get('checker') || '✅'} | Produto **${nome}** editado com sucesso!`, ephemeral: true });
+}
+
+// ─── PRODUTOS ─────────────────────────────────────────────────────────────────
+async function modalCriarProduto(interaction, universeId, catId = null) {
+    const jogoKey = `jogo_${universeId}`;
+    const jogo = gamepassJogos.get(jogoKey);
+    const categorias = jogo?.categorias || [];
+    const catList = categorias.length > 0 ? categorias.map(c => `${c.emoji} ${c.nome} [${c.id.slice(0, 8)}]`).join(', ') : 'Nenhuma (deixe vazio)';
+    const catPre = catId ? (categorias.find(c => c.id === catId) || null) : null;
+
+    const modalId = catId ? `gpj_modal_criar_produto_cat_${universeId}|||${catId}` : `gpj_modal_criar_produto_${universeId}`;
+    const modal = new ModalBuilder().setCustomId(modalId).setTitle('Criar Produto');
+    modal.addComponents(
+        new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('prod_nome').setLabel('Nome do Produto').setPlaceholder('Ex: VIP Pass, Fruta X, Kit Iniciante').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(50)
+        ),
+        new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('prod_tipo').setLabel('Tipo (gamepass / item / outro)').setPlaceholder('gamepass').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(20)
+        ),
+        new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('prod_preco').setLabel('Preço em R$').setPlaceholder('Ex: 15.00').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(10)
+        ),
+        new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('prod_descricao').setLabel('Descrição (opcional)').setPlaceholder('Descreva o produto brevemente').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(300)
+        ),
+        new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('prod_categoria_id').setLabel(`ID da Categoria (8 primeiros chars)`).setPlaceholder(catList.slice(0, 100)).setValue(catPre ? catPre.id.slice(0, 8) : '').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(36)
+        )
+    );
+    await interaction.showModal(modal);
+}
+
+async function handleModalCriarProduto(interaction, universeId, forceCatId = null) {
+    const nome = interaction.fields.getTextInputValue('prod_nome');
+    const tipo = interaction.fields.getTextInputValue('prod_tipo').toLowerCase();
+    const precoStr = interaction.fields.getTextInputValue('prod_preco');
+    const descricao = interaction.fields.getTextInputValue('prod_descricao');
+    const catSearch = interaction.fields.getTextInputValue('prod_categoria_id').trim();
+
+    const preco = parseFloat(precoStr.replace(',', '.'));
+    if (isNaN(preco) || preco <= 0) return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Preço inválido!`, ephemeral: true });
+
+    const jogoKey = `jogo_${universeId}`;
+    const jogo = gamepassJogos.get(jogoKey);
+    if (!jogo) return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Jogo não encontrado!`, ephemeral: true });
+
+    // Encontrar categoria pelo ID parcial ou nome (forceCatId sobrescreve input)
+    let categoriaId = null;
+    if (forceCatId) {
+        categoriaId = forceCatId;
+    } else if (catSearch) {
+        const cat = (jogo.categorias || []).find(c => c.id.startsWith(catSearch) || c.nome.toLowerCase().includes(catSearch.toLowerCase()));
+        if (cat) categoriaId = cat.id;
+    }
+
+    const produtos = jogo.produtos || [];
+    produtos.push({ id: uuidv4(), nome, tipo, preco, descricao: descricao || '', categoriaId, status: true, criadoEm: Date.now() });
+    gamepassJogos.set(`${jogoKey}.produtos`, produtos);
+
+    await painelJogo(interaction, jogoKey);
+    interaction.followUp({ content: `${Emojis.get('checker') || '✅'} | Produto **${nome}** criado!${categoriaId ? '' : ' (sem categoria)'}`, ephemeral: true });
+}
+
+async function painelVerProdutos(interaction, universeId) {
+    const jogoKey = `jogo_${universeId}`;
+    const jogo = gamepassJogos.get(jogoKey);
+    if (!jogo) return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Jogo não encontrado!`, ephemeral: true });
+
+    const produtos = jogo.produtos || [];
+    const categorias = jogo.categorias || [];
+    const rowVoltar = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`gpj_jogo_${universeId}`).setLabel('Voltar').setEmoji(Emojis.get('_back_emoji') || '◀️').setStyle(2)
+    );
+
+    if (produtos.length === 0) {
+        const c = res.main({ type: 10, content: `-# ${jogo.nome} > Produtos` }, { type: 14 }, { type: 10, content: `${Emojis.get('negative') || '❌'} Nenhum produto cadastrado.` })
+            .with({ components: [rowVoltar], flags: [64] });
+        return interaction.deferred || interaction.replied ? interaction.editReply(c) : interaction.update(c);
+    }
+
+    const listaProdutos = produtos.map((p, i) => {
+        const cat = categorias.find(c => c.id === p.categoriaId);
+        return `> **${i + 1}. ${p.nome}** ${cat ? `[${cat.emoji} ${cat.nome}]` : ''}\n> \`R$ ${parseFloat(p.preco).toFixed(2)}\` · ${p.tipo} · ${p.status ? (Emojis.get('checker') || '✅') : (Emojis.get('negative') || '❌')}`;
+    }).join('\n\n');
+
+    const selectOptions = produtos.slice(0, 25).map(p => ({
+        label: p.nome.slice(0, 25),
+        description: `R$ ${parseFloat(p.preco).toFixed(2)} - ${p.tipo}`,
+        value: `gpj_prod_${jogo.id}_${p.id}`,
+        emoji: { id: "1459388854715940968" }
+    }));
+
+    const rows = [rowVoltar];
+    if (selectOptions.length > 0) {
+        rows.unshift(new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder().setCustomId('gpj_select_produto').setPlaceholder('Selecione um produto para gerenciar').addOptions(selectOptions)
+        ));
+    }
+
+    const btRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`gpj_criar_produto_${universeId}`).setLabel('Criar Produto').setEmoji(Emojis.get('_confirm_emoji') || '➕').setStyle(1)
+    );
+    rows.splice(rows.length - 1, 0, btRow);
+
+    const c = res.main(
+        { type: 10, content: `-# ${jogo.nome} > Produtos (${produtos.length})` }, { type: 14 },
+        { type: 10, content: `**Produtos Cadastrados**\n\n${listaProdutos}` }
+    ).with({ components: rows, flags: [64] });
+
+    if (interaction.deferred || interaction.replied) await interaction.editReply(c);
+    else await interaction.update(c);
+}
+
+async function painelProduto(interaction, universeId, produtoId) {
+    const jogoKey = `jogo_${universeId}`;
+    const jogo = gamepassJogos.get(jogoKey);
+    if (!jogo) return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Jogo não encontrado!`, ephemeral: true });
+
+    const produto = (jogo.produtos || []).find(p => p.id === produtoId);
+    if (!produto) return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Produto não encontrado!`, ephemeral: true });
+
+    const cat = (jogo.categorias || []).find(c => c.id === produto.categoriaId);
+    const rowVoltar = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`gpj_ver_produtos_${universeId}`).setLabel('Voltar').setEmoji(Emojis.get('_back_emoji') || '◀️').setStyle(2)
+    );
+
+    const c = res.main(
+        { type: 10, content: `-# ${jogo.nome} > ${produto.nome}` }, { type: 14 },
+        { type: 10, content: `**${produto.nome}**\n> **Tipo:** \`${produto.tipo}\`\n> **Preço:** \`R$ ${parseFloat(produto.preco).toFixed(2)}\`\n> **Categoria:** ${cat ? `${cat.emoji} ${cat.nome}` : '`Sem categoria`'}\n> **Status:** ${produto.status ? ((Emojis.get('checker') || '✅') + ' Ativo') : ((Emojis.get('negative') || '❌') + ' Inativo')}` },
+        { type: 10, content: `**Descrição:**\n\`\`\`${produto.descricao || 'Sem descrição'}\`\`\`` }, { type: 14 },
+        {
+            type: 1, components: [
+                { type: 2, style: produto.status ? 4 : 3, label: produto.status ? "Desativar" : "Ativar", custom_id: `gpj_toggle_prod_${universeId}_${produtoId}`, emoji: { id: produto.status ? "1387981760649756782" : "1387981762050920548" } },
+                { type: 2, style: 1, label: "Editar", custom_id: `gpj_editar_prod_${universeId}|||${produtoId}`, emoji: { id: "1178066208835252266" } },
+                { type: 2, style: 4, label: "Excluir", custom_id: `gpj_excluir_prod_${universeId}_${produtoId}`, emoji: { id: "1178076767567757312" } }
+            ]
+        }
+    ).with({ components: [rowVoltar], flags: [64] });
+
+    if (interaction.deferred || interaction.replied) await interaction.editReply(c);
+    else await interaction.update(c);
+}
+
+// ─── ENVIAR PAINEL ESPECÍFICO DE UM JOGO ─────────────────────────────────────
+async function modalEnviarPainelJogo(interaction, universeId) {
+    const modal = new ModalBuilder().setCustomId(`gpj_modal_enviar_jogo_${universeId}`).setTitle('Enviar Painel do Jogo');
+    modal.addComponents(
+        new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('canal_id').setLabel('ID do Canal').setPlaceholder('Cole aqui o ID do canal onde o painel será enviado').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(25)
+        )
+    );
+    await interaction.showModal(modal);
+}
+
+async function enviarPainelJogoNoCanal(interaction, universeId, channelId, client) {
+    const channel = interaction.guild.channels.cache.get(channelId);
+    if (!channel) return false;
+
+    const jogoKey = `jogo_${universeId}`;
+    const jogo = gamepassJogos.get(jogoKey);
+    if (!jogo) return false;
+
+    const categorias = jogo.categorias || [];
+    const produtosAtivos = (jogo.produtos || []).filter(p => p.status);
+
+    if (produtosAtivos.length === 0) return false;
+
+    // Build category options or direct product options
+    let selectOptions;
+    if (categorias.length > 0) {
+        // Show categories with at least 1 active product
+        const catsComProdutos = categorias.filter(c => produtosAtivos.some(p => p.categoriaId === c.id));
+        const semCategoria = produtosAtivos.filter(p => !p.categoriaId);
+        selectOptions = [
+            ...catsComProdutos.map(c => ({
+                label: `${c.nome}`.slice(0, 25),
+                description: `${produtosAtivos.filter(p => p.categoriaId === c.id).length} produto(s)`,
+                value: `cat_jogo_${universeId}_${c.id}`,
+                emoji: c.emoji ? undefined : { id: "1459388854715940968" }
+            })),
+            ...(semCategoria.length > 0 ? [{ label: 'Outros Produtos', description: `${semCategoria.length} produto(s)`, value: `cat_jogo_${universeId}_sem_cat`, emoji: { id: "1459388854715940968" } }] : [])
+        ];
+    } else {
+        selectOptions = produtosAtivos.slice(0, 25).map(p => ({
+            label: p.nome.slice(0, 25),
+            description: `R$ ${parseFloat(p.preco).toFixed(2)} - ${p.tipo}`,
+            value: `comprar_produto_jogo_${universeId}_${p.id}`,
+            emoji: { id: "1459388854715940968" }
+        }));
+    }
+
+    const containerContent = res.main(
+        { type: 10, content: `# ${jogo.nome}` }, { type: 14 },
+        ...(jogo.icone ? [{ type: 12, items: [{ media: { url: jogo.icone }, spoiler: false }] }] : []),
+        { type: 10, content: `> Bem-vindo à loja de **${jogo.nome}**!\n> Selecione uma ${categorias.length > 0 ? 'categoria' : 'produto'} abaixo para iniciar sua compra.` }, { type: 14 },
+        {
+            type: 1, components: [{
+                type: 3,
+                custom_id: categorias.length > 0 ? "comprar_cat_select" : "comprar_produto_select",
+                placeholder: categorias.length > 0 ? "Selecione uma categoria" : "Selecione um produto",
+                options: selectOptions.slice(0, 25)
+            }]
+        }
+    ).with({ components: [] });
+
+    try {
+        const msg = await channel.send(containerContent);
+        // Salvar painel registrado para o jogo
+        const paineis = jogo.paineis || [];
+        paineis.push({ canalId: channelId, messageId: msg.id, criadoEm: Date.now() });
+        gamepassJogos.set(`${jogoKey}.paineis`, paineis);
+        return true;
+    } catch (e) {
+        console.error('[GamepassProdutos] Erro ao enviar painel:', e);
+        return false;
+    }
+}
+
+// Modal: enviar mensagem global (todos os jogos)
+async function modalEnviarMensagemJogos(interaction) {
+    const modal = new ModalBuilder().setCustomId('gpj_modal_enviar_msg').setTitle('Enviar Painel de Jogos');
+    modal.addComponents(
+        new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('canal_id').setLabel('ID do Canal').setPlaceholder('Cole aqui o ID do canal').setStyle(TextInputStyle.Short).setRequired(true)
+        )
+    );
+    await interaction.showModal(modal);
+}
+
+async function enviarMensagemJogos(interaction, channelId, client) {
+    const channel = interaction.guild.channels.cache.get(channelId);
+    if (!channel) return false;
+
+    const jogos = gamepassJogos.fetchAll() || [];
+    const jogosAtivos = jogos.filter(j => (j.data.produtos || []).some(p => p.status));
+    if (jogosAtivos.length === 0) return null; // nenhum jogo
+
+    const selectOptions = jogosAtivos.map(j => ({
+        label: j.data.nome.slice(0, 25),
+        description: `${(j.data.produtos || []).filter(p => p.status).length} produto(s)`,
+        value: `comprar_jogo_${j.data.id}`,
+        emoji: { id: "1459388854715940968" }
+    }));
+
+    const c = res.main(
+        { type: 10, content: `# ${Emojis.get('robux') || '💎'} Loja de Produtos Roblox` }, { type: 14 },
+        { type: 10, content: `> Selecione o jogo abaixo para ver os produtos disponíveis.` }, { type: 14 },
+        { type: 1, components: [{ type: 3, custom_id: "comprar_jogo_select", placeholder: "Selecione um jogo", options: selectOptions.slice(0, 25) }] }
+    ).with({ components: [] });
+
+    try {
+        await channel.send(c);
+        return true;
+    } catch (e) { return false; }
+}
+
+// ─── FLUXO DE COMPRA PÚBLICA ──────────────────────────────────────────────────
+
+// Mostrar categorias de um jogo público
+async function painelCategoriaPublica(interaction, universeId, catId) {
+    const jogoKey = `jogo_${universeId}`;
+    const jogo = gamepassJogos.get(jogoKey);
+    if (!jogo) return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Jogo não encontrado!`, ephemeral: true });
+
+    const categorias = jogo.categorias || [];
+    let produtosAtivos;
+    let catNome = '';
+
+    if (catId === 'sem_cat') {
+        produtosAtivos = (jogo.produtos || []).filter(p => p.status && !p.categoriaId);
+        catNome = 'Outros Produtos';
+    } else {
+        const cat = categorias.find(c => c.id === catId);
+        if (!cat) return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Categoria não encontrada!`, ephemeral: true });
+        produtosAtivos = (jogo.produtos || []).filter(p => p.status && p.categoriaId === catId);
+        catNome = `${cat.emoji} ${cat.nome}`;
+    }
+
+    if (produtosAtivos.length === 0) {
+        return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Nenhum produto disponível nesta categoria.`, ephemeral: true });
+    }
+
+    const selectOptions = produtosAtivos.slice(0, 25).map(p => ({
+        label: p.nome.slice(0, 25),
+        description: `R$ ${parseFloat(p.preco).toFixed(2)} - ${p.tipo}`,
+        value: `comprar_produto_jogo_${universeId}_${p.id}`,
+        emoji: { id: "1459388854715940968" }
+    }));
+
+    const c = res.main(
+        { type: 10, content: `-# ${jogo.nome} > ${catNome}` }, { type: 14 },
+        { type: 10, content: `**${catNome}**\n> ${produtosAtivos.length} produto(s) disponível(is)\n\nSelecione o produto abaixo:` }, { type: 14 },
+        { type: 1, components: [{ type: 3, custom_id: "comprar_produto_select", placeholder: "Selecione um produto", options: selectOptions }] }
+    ).with({ components: [], flags: [64] });
+
+    if (interaction.deferred || interaction.replied) await interaction.editReply(c);
+    else await interaction.reply(c);
+}
+
+// Mostrar produtos de um jogo (sem categorias)
+async function painelComprarJogo(interaction, universeId, client) {
+    const jogoKey = `jogo_${universeId}`;
+    const jogo = gamepassJogos.get(jogoKey);
+    if (!jogo) return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Jogo não encontrado!`, ephemeral: true });
+
+    const categorias = jogo.categorias || [];
+    const produtosAtivos = (jogo.produtos || []).filter(p => p.status);
+
+    if (produtosAtivos.length === 0) {
+        return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Este jogo não possui produtos disponíveis.`, ephemeral: true });
+    }
+
+    // Se tem categorias: mostrar categorias
+    if (categorias.length > 0) {
+        const catsComProdutos = categorias.filter(c => produtosAtivos.some(p => p.categoriaId === c.id));
+        const semCategoria = produtosAtivos.filter(p => !p.categoriaId);
+        const options = [
+            ...catsComProdutos.map(c => ({
+                label: `${c.nome}`.slice(0, 25),
+                description: `${produtosAtivos.filter(p => p.categoriaId === c.id).length} produto(s)`,
+                value: `cat_jogo_${universeId}_${c.id}`,
+                emoji: c.emoji ? undefined : { id: "1459388854715940968" }
+            })),
+            ...(semCategoria.length > 0 ? [{ label: 'Outros', description: `${semCategoria.length} produto(s)`, value: `cat_jogo_${universeId}_sem_cat`, emoji: { id: "1459388854715940968" } }] : [])
+        ];
+
+        const c = res.main(
+            { type: 10, content: `-# Loja > ${jogo.nome}` }, { type: 14 },
+            ...(jogo.icone ? [{ type: 12, items: [{ media: { url: jogo.icone }, spoiler: false }] }] : []),
+            { type: 10, content: `**${jogo.nome}**\n> Selecione uma categoria abaixo:` }, { type: 14 },
+            { type: 1, components: [{ type: 3, custom_id: "comprar_cat_select", placeholder: "Selecione uma categoria", options: options.slice(0, 25) }] }
+        ).with({ components: [], flags: [64] });
+
+        return interaction.deferred || interaction.replied ? interaction.editReply(c) : interaction.reply(c);
+    }
+
+    // Sem categorias: mostrar produtos diretamente
+    const selectOptions = produtosAtivos.slice(0, 25).map(p => ({
+        label: p.nome.slice(0, 25),
+        description: `R$ ${parseFloat(p.preco).toFixed(2)} - ${p.tipo}`,
+        value: `comprar_produto_jogo_${universeId}_${p.id}`,
+        emoji: { id: "1459388854715940968" }
+    }));
+
+    const c = res.main(
+        { type: 10, content: `-# Loja > ${jogo.nome}` }, { type: 14 },
+        ...(jogo.icone ? [{ type: 12, items: [{ media: { url: jogo.icone }, spoiler: false }] }] : []),
+        { type: 10, content: `**${jogo.nome}**\n> ${produtosAtivos.length} produto(s) disponível(is)` }, { type: 14 },
+        { type: 1, components: [{ type: 3, custom_id: "comprar_produto_select", placeholder: "Selecione um produto", options: selectOptions }] }
+    ).with({ components: [], flags: [64] });
+
+    if (interaction.deferred || interaction.replied) await interaction.editReply(c);
+    else await interaction.reply(c);
+}
+
+// ─── CARRINHO DE JOGO (canal privado) ────────────────────────────────────────
+async function criarCarrinhoJogo(interaction, universeId, produtoId, client) {
+    const jogoKey = `jogo_${universeId}`;
+    const jogo = gamepassJogos.get(jogoKey);
+    if (!jogo) return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Jogo não encontrado!`, ephemeral: true });
+
+    const produto = (jogo.produtos || []).find(p => p.id === produtoId && p.status);
+    if (!produto) return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Produto indisponível!`, ephemeral: true });
+
+    // Verificar carrinho existente
+    const carrinhoExistente = carrinhosJogo.get(`${interaction.user.id}`);
+    if (carrinhoExistente) {
+        const canalExistente = interaction.guild.channels.cache.get(carrinhoExistente.channelId);
+        if (canalExistente) return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Você já possui um pedido aberto em <#${carrinhoExistente.channelId}>!`, ephemeral: true });
+        else carrinhosJogo.delete(`${interaction.user.id}`);
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+    await interaction.editReply({ content: `${Emojis.get('loading') || '⏳'} | Criando carrinho...` });
+
+    try {
+        const categoriaId = robuxConfig.get('config.canais.categoriaCarrinhos');
+        const channel = await interaction.guild.channels.create({
+            name: `🛒・${interaction.user.username}・${produto.nome.slice(0, 15)}`,
+            type: ChannelType.GuildText,
+            parent: categoriaId || null,
+            permissionOverwrites: [
+                { id: interaction.guild.id, deny: [PermissionFlagsBits.ViewChannel] },
+                { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+                { id: client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels] }
+            ]
+        });
+
+        const cat = (jogo.categorias || []).find(c => c.id === produto.categoriaId);
+
+        const embedPedido = new EmbedBuilder()
+            .setColor('#2b2d31')
+            .setAuthor({ name: client.user.username, iconURL: client.user.displayAvatarURL() })
+            .setTitle(`🛒 Pedido — ${produto.nome}`)
+            .addFields(
+                { name: `${Emojis.get('robux') || '🎮'} Jogo`, value: jogo.nome, inline: true },
+                { name: `📂 Categoria`, value: cat ? `${cat.emoji} ${cat.nome}` : 'Sem categoria', inline: true },
+                { name: `🏷️ Tipo`, value: produto.tipo, inline: true },
+                { name: `💳 Preço`, value: `**R$ ${parseFloat(produto.preco).toFixed(2).replace('.', ',')}**`, inline: false },
+                { name: `📝 Descrição`, value: produto.descricao || 'Sem descrição adicional.', inline: false }
+            )
+            .setFooter({ text: 'Aguardando confirmação do pedido...' });
+
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`gpj_confirmar_pedido_${universeId}_${produtoId}`).setLabel('Confirmar Pedido').setEmoji(`${Emojis.get('_confirm_emoji')}`).setStyle(3),
+            new ButtonBuilder().setCustomId('gpj_cancelar_carrinho').setLabel('Cancelar').setEmoji(`${Emojis.get('_trash_emoji')}`).setStyle(4)
+        );
+
+        await channel.send({ content: `<@${interaction.user.id}>`, embeds: [embedPedido], components: [row] });
+
+        carrinhosJogo.set(`${interaction.user.id}`, {
+            channelId: channel.id, userId: interaction.user.id,
+            universeId, produtoId, jogo: jogo.nome, produto: produto.nome, preco: produto.preco,
+            status: 'aguardando', criadoEm: Date.now()
+        });
+
+        const rowLink = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setLabel('Ir para o Pedido').setURL(`https://discord.com/channels/${interaction.guild.id}/${channel.id}`).setEmoji(Emojis.get('_link_emoji') || '🔗').setStyle(5)
+        );
+        await interaction.editReply({ content: `${Emojis.get('checker') || '✅'} | Pedido criado!`, components: [rowLink] });
+    } catch (e) {
+        console.error('[GamepassProdutos] Erro ao criar carrinho:', e);
+        await interaction.editReply({ content: `${Emojis.get('negative') || '❌'} | Erro ao criar o pedido!` });
+    }
+}
+
+async function confirmarPedidoJogo(interaction, universeId, produtoId, client) {
+    const carrinho = carrinhosJogo.get(`${interaction.user.id}`);
+    if (!carrinho) return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Pedido não encontrado!`, ephemeral: true });
+
+    const embedConfirmado = new EmbedBuilder()
+        .setColor('#2ecc71')
+        .setTitle('✅ Pedido Confirmado!')
+        .setDescription(`Seu pedido de **${carrinho.produto}** foi confirmado.\n\nUm administrador entrará em contato em breve para concluir a entrega.\n\n**Valor:** R$ ${parseFloat(carrinho.preco).toFixed(2).replace('.', ',')}`)
+        .setFooter({ text: 'Aguarde o atendimento...' })
+        .setTimestamp();
+
+    const pagPix = require('../DataBaseJson/configuracaorobux.json');
+    const pixKey = robuxConfig.get('pagamentos.SemiAutomatico.pix') || robuxConfig.get('pagamentos.SemiAutomatico');
+
+    await interaction.update({ embeds: [embedConfirmado], components: [] });
+    carrinhosJogo.set(`${interaction.user.id}.status`, 'confirmado');
+}
+
+async function cancelarCarrinhoJogo(interaction, client) {
+    const carrinho = carrinhosJogo.get(`${interaction.user.id}`);
+    if (!carrinho) return interaction.reply({ content: `${Emojis.get('negative') || '❌'} | Pedido não encontrado!`, ephemeral: true });
+
+    carrinhosJogo.delete(`${interaction.user.id}`);
+    const embed = new EmbedBuilder().setColor('#ff0000').setDescription(`${Emojis.get('checker') || '✅'} | Pedido cancelado! O canal será removido em 5 segundos.`);
+    await interaction.update({ embeds: [embed], components: [] });
+    setTimeout(async () => { try { await interaction.channel.delete(); } catch (e) {} }, 5000);
+}
+
+// Função legada: mostrar detalhes do produto (agora delega para criarCarrinho)
+async function mostrarProdutoParaCompra(interaction, universeId, produtoId, client) {
+    await criarCarrinhoJogo(interaction, universeId, produtoId, client);
+}
+
+module.exports = {
+    painelGamepassJogos, modalAdicionarJogo, handleModalAdicionarJogo,
+    painelGerenciarJogos, painelJogo,
+    painelCategorias, modalCriarCategoria, handleModalCriarCategoria, removerCategoria,
+    painelGerenciarCategoria, modalEditarProduto, handleModalEditarProduto,
+    modalCriarProduto, handleModalCriarProduto,
+    painelVerProdutos, painelProduto,
+    modalEnviarPainelJogo, enviarPainelJogoNoCanal,
+    modalEnviarMensagemJogos, enviarMensagemJogos,
+    painelComprarJogo, painelCategoriaPublica, mostrarProdutoParaCompra,
+    criarCarrinhoJogo, confirmarPedidoJogo, cancelarCarrinhoJogo,
+    gamepassJogos, carrinhosJogo
+}
